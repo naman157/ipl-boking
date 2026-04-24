@@ -1,3 +1,77 @@
+const express = require('express');
+const router = express.Router();
+const Match = require('../models/Match');
+const { protect } = require('../middleware/auth');
+
+// IPL 2025 Teams data
+const IPL_TEAMS = {
+  CSK: { name: 'Chennai Super Kings', shortName: 'CSK', color: '#F5A800' },
+  MI: { name: 'Mumbai Indians', shortName: 'MI', color: '#004BA0' },
+  RCB: { name: 'Royal Challengers Bengaluru', shortName: 'RCB', color: '#EC1C24' },
+  KKR: { name: 'Kolkata Knight Riders', shortName: 'KKR', color: '#3A225D' },
+  DC: { name: 'Delhi Capitals', shortName: 'DC', color: '#0078BC' },
+  PBKS: { name: 'Punjab Kings', shortName: 'PBKS', color: '#ED1B24' },
+  RR: { name: 'Rajasthan Royals', shortName: 'RR', color: '#EA1A85' },
+  SRH: { name: 'Sunrisers Hyderabad', shortName: 'SRH', color: '#FF6200' },
+  GT: { name: 'Gujarat Titans', shortName: 'GT', color: '#1C1C5E' },
+  LSG: { name: 'Lucknow Super Giants', shortName: 'LSG', color: '#A72B2A' }
+};
+
+// @GET /api/matches - Get all matches
+router.get('/', async (req, res) => {
+  try {
+    const { status, city, team } = req.query;
+    let filter = {};
+    if (status) filter.status = status;
+    if (city) filter['venue.city'] = new RegExp(city, 'i');
+    if (team) {
+      filter.$or = [
+        { 'team1.shortName': team.toUpperCase() },
+        { 'team2.shortName': team.toUpperCase() }
+      ];
+    }
+
+    const matches = await Match.find(filter).sort({ date: 1 });
+
+    // Auto-update status based on current date
+    const now = new Date();
+    const updatePromises = matches.map(match => {
+      if (match.status === 'cancelled') return null;
+
+      const matchStart = new Date(match.date);
+      const matchEnd = new Date(match.date);
+      matchEnd.setHours(matchEnd.getHours() + 4);
+
+      let newStatus;
+      if (now < matchStart) newStatus = 'upcoming';
+      else if (now >= matchStart && now <= matchEnd) newStatus = 'live';
+      else newStatus = 'completed';
+
+      if (newStatus !== match.status) {
+        match.status = newStatus;
+        return match.save();
+      }
+      return null;
+    });
+
+    await Promise.all(updatePromises.filter(Boolean));
+    res.json(matches);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// @GET /api/matches/:id
+router.get('/:id', async (req, res) => {
+  try {
+    const match = await Match.findById(req.params.id);
+    if (!match) return res.status(404).json({ error: 'Match not found' });
+    res.json(match);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // @POST /api/matches/seed - Seed sample matches (dev only)
 router.post('/seed', async (req, res) => {
   try {
@@ -251,3 +325,5 @@ router.post('/seed', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+module.exports = router;
