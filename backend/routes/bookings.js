@@ -33,31 +33,62 @@ router.get('/:id', protect, async (req, res) => {
 });
 
 // @POST /api/bookings/create - Create a booking (pending payment)
+// Supports two modes:
+//   1. Category-based (new): { matchId, categoryName, quantity, attendees }
+//   2. Seat-based (legacy):  { matchId, seatIds, attendees }
 router.post('/create', protect, async (req, res) => {
   try {
-    const { matchId, seatIds, attendees } = req.body;
+    const { matchId, seatIds, categoryName, quantity, attendees } = req.body;
 
     const match = await Match.findById(matchId);
     if (!match) return res.status(404).json({ error: 'Match not found' });
     if (match.status === 'cancelled') return res.status(400).json({ error: 'Match is cancelled' });
 
-    // Get held seats
-    const seats = await Seat.find({
-      _id: { $in: seatIds },
-      match: matchId,
-      status: 'held',
-      heldBy: req.user._id
-    });
+    let seatsData = [];
 
-    if (seats.length !== seatIds.length)
-      return res.status(409).json({ error: 'Seats are no longer held. Please re-select.' });
+    // ── MODE 1: category-based booking ──────────────────────────────────────
+    if (categoryName && quantity) {
+      const qty = parseInt(quantity);
+      if (!qty || qty < 1 || qty > 6)
+        return res.status(400).json({ error: 'Quantity must be between 1 and 6' });
 
-    const seatsData = seats.map(s => ({
-      seatNumber: s.seatNumber,
-      row: s.row,
-      category: s.category,
-      price: s.price
-    }));
+      const category = match.ticketCategories.find(c => c.name === categoryName);
+      if (!category) return res.status(404).json({ error: 'Category not found' });
+      if (category.availableSeats < qty)
+        return res.status(409).json({ error: `Only ${category.availableSeats} seats left in ${categoryName}` });
+
+      // Assign sequential seat numbers automatically
+      seatsData = Array.from({ length: qty }, (_, i) => ({
+        seatNumber: `AUTO-${categoryName.substring(0, 3).toUpperCase()}-${Date.now()}-${i + 1}`,
+        row: 'AUTO',
+        category: categoryName,
+        price: category.price,
+      }));
+    }
+
+    // ── MODE 2: seat-ID-based booking (legacy) ───────────────────────────────
+    else if (seatIds && seatIds.length > 0) {
+      const seats = await Seat.find({
+        _id: { $in: seatIds },
+        match: matchId,
+        status: 'held',
+        heldBy: req.user._id,
+      });
+
+      if (seats.length !== seatIds.length)
+        return res.status(409).json({ error: 'Seats are no longer held. Please re-select.' });
+
+      seatsData = seats.map(s => ({
+        seatNumber: s.seatNumber,
+        row: s.row,
+        category: s.category,
+        price: s.price,
+      }));
+    }
+
+    else {
+      return res.status(400).json({ error: 'Provide either categoryName + quantity or seatIds' });
+    }
 
     const totalAmount = seatsData.reduce((sum, s) => sum + s.price, 0);
     const convenienceFee = Math.round(totalAmount * 0.02);
@@ -72,7 +103,7 @@ router.post('/create', protect, async (req, res) => {
       grandTotal,
       attendees: attendees || [{ name: req.user.name }],
       status: 'pending',
-      paymentStatus: 'pending'
+      paymentStatus: 'pending',
     });
 
     res.status(201).json(booking);
@@ -89,22 +120,27 @@ router.post('/:id/confirm', protect, async (req, res) => {
     const booking = await Booking.findOne({ _id: req.params.id, user: req.user._id });
     if (!booking) return res.status(404).json({ error: 'Booking not found' });
 
-    // Update seats to booked
-    const seatNumbers = booking.seats.map(s => s.seatNumber);
-    await Seat.updateMany(
-      { match: booking.match, seatNumber: { $in: seatNumbers } },
-      { $set: { status: 'booked', booking: booking._id, heldBy: null, heldUntil: null } }
-    );
-
-    // Update match available seats
+    // Deduct available seats in match for each category
+    const categoryQuantities = {};
     for (const seat of booking.seats) {
+      categoryQuantities[seat.category] = (categoryQuantities[seat.category] || 0) + 1;
+    }
+    for (const [catName, qty] of Object.entries(categoryQuantities)) {
       await Match.updateOne(
-        { _id: booking.match, 'ticketCategories.name': seat.category },
-        { $inc: { 'ticketCategories.$.availableSeats': -1 } }
+        { _id: booking.match, 'ticketCategories.name': catName },
+        { $inc: { 'ticketCategories.$.availableSeats': -qty } }
       );
     }
 
-    // Update user's bookings
+    // If seat-based, mark those seats as booked
+    const seatNumbers = booking.seats.filter(s => s.row !== 'AUTO').map(s => s.seatNumber);
+    if (seatNumbers.length > 0) {
+      await Seat.updateMany(
+        { match: booking.match, seatNumber: { $in: seatNumbers } },
+        { $set: { status: 'booked', booking: booking._id, heldBy: null, heldUntil: null } }
+      );
+    }
+
     await User.findByIdAndUpdate(req.user._id, { $push: { bookings: booking._id } });
 
     booking.status = 'confirmed';
@@ -126,18 +162,24 @@ router.post('/:id/cancel', protect, async (req, res) => {
     if (!booking) return res.status(404).json({ error: 'Booking not found' });
     if (booking.status === 'cancelled') return res.status(400).json({ error: 'Already cancelled' });
 
-    // Release seats
-    const seatNumbers = booking.seats.map(s => s.seatNumber);
-    await Seat.updateMany(
-      { match: booking.match, seatNumber: { $in: seatNumbers } },
-      { $set: { status: 'available', booking: null } }
-    );
-
-    // Restore available seats in match
+    // Restore available seat count
+    const categoryQuantities = {};
     for (const seat of booking.seats) {
+      categoryQuantities[seat.category] = (categoryQuantities[seat.category] || 0) + 1;
+    }
+    for (const [catName, qty] of Object.entries(categoryQuantities)) {
       await Match.updateOne(
-        { _id: booking.match, 'ticketCategories.name': seat.category },
-        { $inc: { 'ticketCategories.$.availableSeats': 1 } }
+        { _id: booking.match, 'ticketCategories.name': catName },
+        { $inc: { 'ticketCategories.$.availableSeats': qty } }
+      );
+    }
+
+    // Release any physical seats if seat-based
+    const seatNumbers = booking.seats.filter(s => s.row !== 'AUTO').map(s => s.seatNumber);
+    if (seatNumbers.length > 0) {
+      await Seat.updateMany(
+        { match: booking.match, seatNumber: { $in: seatNumbers } },
+        { $set: { status: 'available', booking: null } }
       );
     }
 

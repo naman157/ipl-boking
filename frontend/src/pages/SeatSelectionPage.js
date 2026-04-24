@@ -1,47 +1,65 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { useParams, useLocation, useNavigate } from 'react-router-dom';
-import { seatsAPI, bookingsAPI, matchesAPI } from '../utils/api';
+import React, { useState, useEffect } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { bookingsAPI, matchesAPI } from '../utils/api';
 import toast from 'react-hot-toast';
 
-const SECTION_LAYOUT = {
-  'Platinum Pavilion': { rows: ['A','B','C','D'], seatsPerRow: 20, prefix: 'P', color: '#E5C100' },
-  'Gold Stand':        { rows: ['E','F','G','H','I','J','K','L'], seatsPerRow: 25, prefix: 'G', color: '#FFD700' },
-  'Silver Stand':      { rows: ['M','N','O','P','Q','R','S','T'], seatsPerRow: 30, prefix: 'S', color: '#C0C0C0' },
-  'General':           { rows: ['U','V','W','X','Y','Z'], seatsPerRow: 40, prefix: 'N', color: '#CD7F32' }
+const CATEGORY_META = {
+  'Platinum Pavilion': {
+    icon: '👑',
+    description: 'Best view · Premium hospitality lounge · Padded seats',
+    perks: ['Complimentary snacks', 'Dedicated entry gate', 'Premium viewing angle'],
+    gradient: 'linear-gradient(135deg, #E5C100 0%, #f5d84a 100%)',
+    glow: '#E5C10055',
+    textColor: '#1a1200',
+  },
+  'Gold Stand': {
+    icon: '⭐',
+    description: 'Excellent sightlines · Covered seating · Great atmosphere',
+    perks: ['Covered from rain', 'Great crowd energy', 'Wide seat spacing'],
+    gradient: 'linear-gradient(135deg, #FFD700 0%, #ffc200 100%)',
+    glow: '#FFD70044',
+    textColor: '#1a1200',
+  },
+  'Silver Stand': {
+    icon: '🎟️',
+    description: 'Good view · Open stand · Lively section',
+    perks: ['Open-air experience', 'Central location', 'Budget-friendly'],
+    gradient: 'linear-gradient(135deg, #9ca3af 0%, #d1d5db 100%)',
+    glow: '#C0C0C033',
+    textColor: '#111',
+  },
+  'General': {
+    icon: '🏟️',
+    description: 'Value seating · Open stand · Full match view',
+    perks: ['Affordable pricing', 'Large capacity section', 'Full match access'],
+    gradient: 'linear-gradient(135deg, #b45309 0%, #d97706 100%)',
+    glow: '#CD7F3233',
+    textColor: '#fff',
+  },
 };
+
+const MAX_TICKETS = 6;
 
 export default function SeatSelectionPage() {
   const { id: matchId } = useParams();
-  const { state } = useLocation();
   const navigate = useNavigate();
 
   const [match, setMatch] = useState(null);
-  const [seats, setSeats] = useState([]);
-  const [seatMap, setSeatMap] = useState({});
-  const [selectedSeats, setSelectedSeats] = useState([]);
-  const [activeCategory, setActiveCategory] = useState(state?.category?.name || '');
   const [loading, setLoading] = useState(true);
-  const [holding, setHolding] = useState(false);
-  const maxQty = state?.quantity || 1;
+  const [selectedCategory, setSelectedCategory] = useState(null);
+  const [quantity, setQuantity] = useState(1);
+  const [proceeding, setProceeding] = useState(false);
 
   useEffect(() => {
     const init = async () => {
       try {
-        const [matchRes, seatsRes] = await Promise.all([
-          matchesAPI.getById(matchId),
-          seatsAPI.getByMatch(matchId).catch(() => ({ data: [] }))
-        ]);
-        setMatch(matchRes.data);
-        if (!activeCategory && matchRes.data.ticketCategories?.[0]) {
-          setActiveCategory(matchRes.data.ticketCategories[0].name);
-        }
-
-        const map = {};
-        seatsRes.data.forEach(s => { map[s.seatNumber] = s; });
-        setSeatMap(map);
-        setSeats(seatsRes.data);
-      } catch (e) {
-        toast.error('Failed to load seats');
+        const res = await matchesAPI.getById(matchId);
+        setMatch(res.data);
+        // Auto-select first available category
+        const firstAvail = res.data.ticketCategories?.find(c => c.availableSeats > 0);
+        if (firstAvail) setSelectedCategory(firstAvail.name);
+      } catch {
+        toast.error('Failed to load match');
       } finally {
         setLoading(false);
       }
@@ -49,208 +67,295 @@ export default function SeatSelectionPage() {
     init();
   }, [matchId]);
 
-  const toggleSeat = useCallback((seatNum, status) => {
-    if (status === 'booked') return;
-    if (status === 'held') return; // held by others
-
-    setSelectedSeats(prev => {
-      if (prev.includes(seatNum)) return prev.filter(s => s !== seatNum);
-      if (prev.length >= maxQty) {
-        toast.error(`Max ${maxQty} seat${maxQty > 1 ? 's' : ''} allowed`);
-        return prev;
-      }
-      return [...prev, seatNum];
-    });
-  }, [maxQty]);
-
   const handleProceed = async () => {
-    if (selectedSeats.length === 0) { toast.error('Please select at least one seat'); return; }
-    setHolding(true);
+    if (!selectedCategory) { toast.error('Please select a category'); return; }
+    setProceeding(true);
     try {
-      const seatObjects = selectedSeats.map(sn => seatMap[sn]).filter(Boolean);
-      const seatIds = seatObjects.map(s => s._id);
+      const category = match.ticketCategories.find(c => c.name === selectedCategory);
 
-      await seatsAPI.holdSeats(matchId, seatIds);
-
-      const category = match.ticketCategories.find(c => c.name === activeCategory);
+      // Create booking directly without seat-level holding
       const booking = await bookingsAPI.create({
         matchId,
-        seatIds,
-        attendees: [{ name: 'Attendee' }]
+        categoryName: selectedCategory,
+        quantity,
+        attendees: Array.from({ length: quantity }, (_, i) => ({ name: `Attendee ${i + 1}` })),
       });
 
       navigate(`/checkout/${booking.data._id}`);
     } catch (err) {
-      toast.error(err.response?.data?.error || 'Failed to hold seats. Try again.');
+      toast.error(err.response?.data?.error || 'Something went wrong. Try again.');
     } finally {
-      setHolding(false);
+      setProceeding(false);
     }
   };
 
-  if (loading) return <div className="loading-screen"><div className="loader" /></div>;
+  if (loading) return (
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-primary)' }}>
+      <div className="loader" />
+    </div>
+  );
   if (!match) return <div className="page"><div className="container">Match not found.</div></div>;
 
-  const config = SECTION_LAYOUT[activeCategory] || Object.values(SECTION_LAYOUT)[0];
-  const categoryInfo = match.ticketCategories?.find(c => c.name === activeCategory);
-  const totalPrice = selectedSeats.length * (categoryInfo?.price || 0);
+  const activeCat = match.ticketCategories?.find(c => c.name === selectedCategory);
+  const meta = CATEGORY_META[selectedCategory] || {};
+  const subtotal = (activeCat?.price || 0) * quantity;
+  const convenience = Math.round(subtotal * 0.02);
+  const grandTotal = subtotal + convenience;
 
   return (
-    <div className="page">
-      <div className="container" style={{ paddingTop: 32, paddingBottom: 80 }}>
-        {/* Header */}
-        <div style={{ marginBottom: 32 }}>
-          <button onClick={() => navigate(-1)} style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontFamily: 'Rajdhani, sans-serif', fontSize: 14, marginBottom: 16 }}>
-            ← Back
-          </button>
-          <h1 style={{ fontSize: 'clamp(2rem, 5vw, 3.5rem)' }}>
-            SELECT <span style={{ color: 'var(--ipl-orange)' }}>SEATS</span>
-          </h1>
-          <p style={{ color: 'var(--text-secondary)' }}>
-            {match.team1.shortName} vs {match.team2.shortName} · {match.venue.name}
-          </p>
-        </div>
+    <div className="page" style={{ background: 'var(--bg-primary)', minHeight: '100vh' }}>
+      <div className="container" style={{ paddingTop: 32, paddingBottom: 100, maxWidth: 960 }}>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 320px', gap: 32, alignItems: 'start' }}>
-          {/* Stadium Map */}
+        {/* Back + Title */}
+        <button
+          onClick={() => navigate(-1)}
+          style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontFamily: 'Rajdhani, sans-serif', fontSize: 14, marginBottom: 20, display: 'flex', alignItems: 'center', gap: 6 }}
+        >
+          ← Back to Match
+        </button>
+
+        <h1 style={{ fontSize: 'clamp(1.8rem, 4vw, 3rem)', marginBottom: 4 }}>
+          BOOK <span style={{ color: 'var(--ipl-orange)' }}>TICKETS</span>
+        </h1>
+        <p style={{ color: 'var(--text-secondary)', marginBottom: 32, fontSize: 15 }}>
+          {match.team1.shortName} vs {match.team2.shortName} &nbsp;·&nbsp; {match.venue.name}, {match.venue.city} &nbsp;·&nbsp; {match.time}
+        </p>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 300px', gap: 28, alignItems: 'start' }}>
+
+          {/* LEFT — Category Cards */}
           <div>
-            {/* Category tabs */}
-            <div style={{ display: 'flex', gap: 8, marginBottom: 24, flexWrap: 'wrap' }}>
-              {match.ticketCategories?.map(cat => (
-                <button
-                  key={cat.name}
-                  onClick={() => { setActiveCategory(cat.name); setSelectedSeats([]); }}
-                  style={{
-                    padding: '8px 16px', borderRadius: 6, border: 'none', cursor: 'pointer',
-                    fontFamily: 'Rajdhani, sans-serif', fontWeight: 600, fontSize: 14,
-                    background: activeCategory === cat.name ? (cat.color || 'var(--ipl-orange)') : 'var(--bg-card)',
-                    color: activeCategory === cat.name ? '#000' : 'var(--text-secondary)',
-                    transition: 'all 0.2s'
-                  }}
-                >
-                  {cat.name}
-                  <span style={{ marginLeft: 8, fontSize: 12, opacity: 0.8 }}>₹{cat.price.toLocaleString()}</span>
-                </button>
-              ))}
-            </div>
+            <p style={{ fontSize: 13, color: 'var(--text-muted)', fontFamily: 'Rajdhani, sans-serif', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 16 }}>
+              Select Ticket Category
+            </p>
 
-            {/* Stadium visual */}
-            <StadiumVisual match={match} activeCategory={activeCategory} onSelectCategory={setActiveCategory} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {match.ticketCategories?.map(cat => {
+                const m = CATEGORY_META[cat.name] || {};
+                const isSelected = selectedCategory === cat.name;
+                const isSoldOut = cat.availableSeats === 0;
+                const availPct = Math.round((cat.availableSeats / cat.totalSeats) * 100);
+                const isLow = availPct < 20 && !isSoldOut;
 
-            {/* Seat Grid */}
-            <div className="card" style={{ padding: '24px', marginTop: 24 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-                <h3 style={{ fontSize: 20 }}>{activeCategory}</h3>
-                <div style={{ display: 'flex', gap: 16, fontSize: 13, color: 'var(--text-muted)' }}>
-                  <LegendItem color="var(--bg-surface)" border="rgba(255,255,255,0.2)" label="Available" />
-                  <LegendItem color={config.color} label="Selected" />
-                  <LegendItem color="rgba(255,255,255,0.08)" label="Booked" />
-                </div>
-              </div>
+                return (
+                  <div
+                    key={cat.name}
+                    onClick={() => !isSoldOut && setSelectedCategory(cat.name)}
+                    style={{
+                      borderRadius: 12,
+                      border: isSelected ? `2px solid ${cat.color || '#E5C100'}` : '2px solid var(--border)',
+                      background: isSelected ? `${cat.color || '#E5C100'}0f` : 'var(--bg-card)',
+                      cursor: isSoldOut ? 'not-allowed' : 'pointer',
+                      opacity: isSoldOut ? 0.45 : 1,
+                      transition: 'all 0.2s',
+                      overflow: 'hidden',
+                      boxShadow: isSelected ? `0 0 20px ${cat.color || '#E5C100'}22` : 'none',
+                    }}
+                  >
+                    {/* Top bar */}
+                    <div style={{
+                      background: isSelected ? (m.gradient || cat.color) : 'var(--bg-surface)',
+                      padding: '14px 20px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <span style={{ fontSize: 22 }}>{m.icon || '🎟️'}</span>
+                        <div>
+                          <div style={{
+                            fontFamily: 'Rajdhani, sans-serif',
+                            fontWeight: 700,
+                            fontSize: 17,
+                            color: isSelected ? (m.textColor || '#000') : 'var(--text-primary)',
+                            letterSpacing: '0.03em'
+                          }}>
+                            {cat.name}
+                          </div>
+                          <div style={{ fontSize: 12, color: isSelected ? (m.textColor || '#333') : 'var(--text-muted)', opacity: 0.85 }}>
+                            {m.description}
+                          </div>
+                        </div>
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <div style={{
+                          fontFamily: 'Rajdhani, sans-serif',
+                          fontWeight: 800,
+                          fontSize: 22,
+                          color: isSelected ? (m.textColor || '#000') : 'var(--ipl-gold)',
+                        }}>
+                          ₹{cat.price.toLocaleString()}
+                        </div>
+                        <div style={{ fontSize: 11, color: isSelected ? (m.textColor || '#333') : 'var(--text-muted)', opacity: 0.8 }}>
+                          per ticket
+                        </div>
+                      </div>
+                    </div>
 
-              {/* Screen/Pitch */}
-              <div style={{ textAlign: 'center', marginBottom: 20 }}>
-                <div style={{
-                  display: 'inline-block', padding: '6px 40px',
-                  background: 'linear-gradient(90deg, transparent, rgba(255,215,0,0.15), transparent)',
-                  border: '1px solid rgba(255,215,0,0.3)', borderRadius: 4,
-                  fontFamily: 'Rajdhani, sans-serif', fontSize: 12, letterSpacing: '0.15em',
-                  color: 'var(--ipl-gold)', textTransform: 'uppercase'
-                }}>🏏 PITCH</div>
-              </div>
-
-              <div style={{ overflowX: 'auto' }}>
-                {config.rows.map(row => (
-                  <div key={row} style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4 }}>
-                    <span style={{ width: 20, textAlign: 'center', fontFamily: 'Rajdhani, sans-serif', fontSize: 12, color: 'var(--text-muted)', flexShrink: 0 }}>{row}</span>
-                    <div style={{ display: 'flex', gap: 3, flexWrap: 'nowrap' }}>
-                      {Array.from({ length: config.seatsPerRow }, (_, i) => {
-                        const seatNum = `${config.prefix}${row}${i + 1}`;
-                        const seatData = seatMap[seatNum];
-                        const status = seatData?.status || 'available';
-                        const isSelected = selectedSeats.includes(seatNum);
-
-                        let bg = 'rgba(255,255,255,0.06)';
-                        let border = '1px solid rgba(255,255,255,0.12)';
-                        if (isSelected) { bg = config.color; border = `1px solid ${config.color}`; }
-                        else if (status === 'booked') { bg = 'rgba(255,255,255,0.03)'; border = '1px solid rgba(255,255,255,0.05)'; }
-                        else if (status === 'held') { bg = 'rgba(255,107,0,0.2)'; border = '1px solid rgba(255,107,0,0.3)'; }
-
-                        return (
-                          <div
-                            key={seatNum}
-                            title={`${seatNum} - ${status}`}
-                            onClick={() => toggleSeat(seatNum, status)}
-                            style={{
-                              width: 14, height: 14, borderRadius: 2,
-                              background: bg, border,
-                              cursor: status === 'booked' ? 'not-allowed' : 'pointer',
-                              transition: 'all 0.15s',
-                              flexShrink: 0
-                            }}
-                          />
-                        );
-                      })}
+                    {/* Bottom detail */}
+                    <div style={{ padding: '12px 20px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <div style={{ display: 'flex', gap: 16 }}>
+                        {(m.perks || []).slice(0, 2).map((p, i) => (
+                          <span key={i} style={{ fontSize: 12, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <span style={{ color: cat.color || 'var(--ipl-orange)', fontSize: 10 }}>✓</span> {p}
+                          </span>
+                        ))}
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        {isSoldOut ? (
+                          <span style={{ fontSize: 12, color: '#ef4444', fontFamily: 'Rajdhani, sans-serif', fontWeight: 700 }}>SOLD OUT</span>
+                        ) : isLow ? (
+                          <span style={{ fontSize: 12, color: '#f97316', fontFamily: 'Rajdhani, sans-serif', fontWeight: 700 }}>
+                            ⚡ Only {cat.availableSeats.toLocaleString()} left
+                          </span>
+                        ) : (
+                          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                            {cat.availableSeats.toLocaleString()} available
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
-                ))}
-              </div>
+                );
+              })}
+            </div>
+
+            {/* Stadium zone diagram */}
+            <div style={{ marginTop: 28, background: 'var(--bg-card)', border: '1px solid var(--border)', borderRadius: 12, padding: 20 }}>
+              <p style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'Rajdhani, sans-serif', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 16, textAlign: 'center' }}>
+                Stadium Zone Map — {match.venue.name}
+              </p>
+              <StadiumDiagram categories={match.ticketCategories} selected={selectedCategory} onSelect={setSelectedCategory} />
             </div>
           </div>
 
-          {/* Selection Summary */}
+          {/* RIGHT — Summary + Quantity */}
           <div style={{ position: 'sticky', top: 90 }}>
-            <div className="card" style={{ padding: 24 }}>
-              <h3 style={{ marginBottom: 20, fontSize: 20 }}>YOUR SELECTION</h3>
-
-              <div style={{ marginBottom: 16 }}>
-                <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4, fontFamily: 'Rajdhani, sans-serif', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                  Selected Seats ({selectedSeats.length}/{maxQty})
+            <div style={{
+              background: 'var(--bg-card)',
+              border: '1px solid var(--border)',
+              borderRadius: 14,
+              overflow: 'hidden',
+            }}>
+              {/* Header */}
+              <div style={{
+                background: activeCat ? (meta.gradient || `${activeCat.color}22`) : 'var(--bg-surface)',
+                padding: '18px 20px',
+                borderBottom: '1px solid var(--border)',
+              }}>
+                <div style={{ fontFamily: 'Rajdhani, sans-serif', fontWeight: 700, fontSize: 18, color: activeCat ? (meta.textColor || 'var(--text-primary)') : 'var(--text-muted)' }}>
+                  {selectedCategory || 'No category selected'}
                 </div>
-                {selectedSeats.length === 0 ? (
-                  <div style={{ color: 'var(--text-muted)', fontSize: 14, fontStyle: 'italic', padding: '12px 0' }}>No seats selected</div>
-                ) : (
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
-                    {selectedSeats.map(sn => (
-                      <span key={sn} style={{
-                        background: `${config.color}22`, border: `1px solid ${config.color}66`,
-                        color: config.color, padding: '3px 10px', borderRadius: 4,
-                        fontFamily: 'Rajdhani, sans-serif', fontWeight: 600, fontSize: 14
-                      }}>{sn}</span>
-                    ))}
+                {activeCat && (
+                  <div style={{ fontSize: 13, color: activeCat ? (meta.textColor || 'var(--text-secondary)') : 'var(--text-muted)', opacity: 0.85, marginTop: 2 }}>
+                    ₹{activeCat.price.toLocaleString()} per ticket
                   </div>
                 )}
               </div>
 
-              <div className="divider" />
+              <div style={{ padding: '20px' }}>
+                {/* Quantity selector */}
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontSize: 13, color: 'var(--text-muted)', fontFamily: 'Rajdhani, sans-serif', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>
+                    Number of Tickets
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    <button
+                      onClick={() => setQuantity(q => Math.max(1, q - 1))}
+                      style={{
+                        width: 36, height: 36, borderRadius: 8,
+                        border: '1px solid var(--border)',
+                        background: 'var(--bg-surface)',
+                        color: 'var(--text-primary)',
+                        fontSize: 20, cursor: 'pointer',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontWeight: 700,
+                      }}
+                    >−</button>
+                    <span style={{ fontFamily: 'Rajdhani, sans-serif', fontWeight: 800, fontSize: 28, minWidth: 32, textAlign: 'center', color: 'var(--ipl-orange)' }}>
+                      {quantity}
+                    </span>
+                    <button
+                      onClick={() => setQuantity(q => Math.min(MAX_TICKETS, activeCat ? Math.min(MAX_TICKETS, activeCat.availableSeats, q + 1) : q + 1))}
+                      style={{
+                        width: 36, height: 36, borderRadius: 8,
+                        border: '1px solid var(--border)',
+                        background: 'var(--bg-surface)',
+                        color: 'var(--text-primary)',
+                        fontSize: 20, cursor: 'pointer',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontWeight: 700,
+                      }}
+                    >+</button>
+                    <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Max {MAX_TICKETS}</span>
+                  </div>
+                </div>
 
-              <div style={{ marginBottom: 8, display: 'flex', justifyContent: 'space-between', color: 'var(--text-secondary)', fontSize: 14 }}>
-                <span>Category</span><span style={{ color: config.color }}>{activeCategory}</span>
-              </div>
-              <div style={{ marginBottom: 8, display: 'flex', justifyContent: 'space-between', color: 'var(--text-secondary)', fontSize: 14 }}>
-                <span>{selectedSeats.length} × ₹{categoryInfo?.price?.toLocaleString()}</span>
-                <span>₹{totalPrice.toLocaleString()}</span>
-              </div>
-              <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', color: 'var(--text-muted)', fontSize: 13 }}>
-                <span>Convenience (2%)</span>
-                <span>₹{Math.round(totalPrice * 0.02).toLocaleString()}</span>
-              </div>
+                {/* Quick quantity buttons */}
+                <div style={{ display: 'flex', gap: 6, marginBottom: 20, flexWrap: 'wrap' }}>
+                  {[1, 2, 3, 4, 5, 6].map(n => (
+                    <button
+                      key={n}
+                      onClick={() => setQuantity(n)}
+                      style={{
+                        width: 36, height: 32, borderRadius: 6,
+                        border: quantity === n ? '1.5px solid var(--ipl-orange)' : '1px solid var(--border)',
+                        background: quantity === n ? 'var(--ipl-orange)' : 'var(--bg-surface)',
+                        color: quantity === n ? '#fff' : 'var(--text-secondary)',
+                        fontSize: 13, cursor: 'pointer',
+                        fontFamily: 'Rajdhani, sans-serif', fontWeight: 600,
+                        transition: 'all 0.15s',
+                      }}
+                    >{n}</button>
+                  ))}
+                </div>
 
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 24, fontFamily: 'Rajdhani, sans-serif', fontWeight: 700, fontSize: 20 }}>
-                <span>Total</span>
-                <span style={{ color: 'var(--ipl-gold)' }}>₹{(totalPrice + Math.round(totalPrice * 0.02)).toLocaleString()}</span>
-              </div>
+                {/* Price breakdown */}
+                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 16, marginBottom: 20 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 14, color: 'var(--text-secondary)', marginBottom: 8 }}>
+                    <span>{quantity} × ₹{activeCat?.price?.toLocaleString() || 0}</span>
+                    <span>₹{subtotal.toLocaleString()}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, color: 'var(--text-muted)', marginBottom: 12 }}>
+                    <span>Convenience fee (2%)</span>
+                    <span>₹{convenience.toLocaleString()}</span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'Rajdhani, sans-serif', fontWeight: 800, fontSize: 22 }}>
+                    <span>Total</span>
+                    <span style={{ color: 'var(--ipl-gold)' }}>₹{grandTotal.toLocaleString()}</span>
+                  </div>
+                </div>
 
-              <button
-                className="btn btn-primary"
-                style={{ width: '100%', justifyContent: 'center' }}
-                onClick={handleProceed}
-                disabled={selectedSeats.length === 0 || holding}
-              >
-                {holding ? <span className="spinner" /> : `Proceed to Checkout →`}
-              </button>
-              <p style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', marginTop: 10 }}>
-                Seats held for 10 minutes after selection
-              </p>
+                <button
+                  className="btn btn-primary"
+                  style={{ width: '100%', justifyContent: 'center', fontSize: 15, padding: '14px', opacity: (!selectedCategory || proceeding) ? 0.6 : 1 }}
+                  onClick={handleProceed}
+                  disabled={!selectedCategory || proceeding}
+                >
+                  {proceeding ? <span className="spinner" /> : 'Proceed to Checkout →'}
+                </button>
+
+                <p style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'center', marginTop: 10, lineHeight: 1.5 }}>
+                  Seats will be assigned automatically from the selected block
+                </p>
+              </div>
+            </div>
+
+            {/* Match info card */}
+            <div style={{
+              marginTop: 14,
+              background: 'var(--bg-card)',
+              border: '1px solid var(--border)',
+              borderRadius: 12,
+              padding: '14px 18px',
+              fontSize: 13,
+              color: 'var(--text-muted)',
+              lineHeight: 2,
+            }}>
+              <div>📅 {new Date(match.date).toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}</div>
+              <div>🕐 {match.time}</div>
+              <div>📍 {match.venue.name}</div>
+              <div>🏏 Match #{match.matchNumber}{match.matchType ? ` · ${match.matchType.toUpperCase()}` : ''}</div>
             </div>
           </div>
         </div>
@@ -259,58 +364,42 @@ export default function SeatSelectionPage() {
   );
 }
 
-function StadiumVisual({ match, activeCategory, onSelectCategory }) {
-  const cats = match.ticketCategories || [];
-  return (
-    <div style={{
-      background: 'var(--bg-card)', border: '1px solid var(--border)',
-      borderRadius: 'var(--radius)', padding: 24, textAlign: 'center'
-    }}>
-      <div style={{ fontSize: 13, color: 'var(--text-muted)', fontFamily: 'Rajdhani, sans-serif', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 20 }}>
-        Stadium Overview — {match.venue.name}
-      </div>
-      <div style={{ position: 'relative', width: '100%', maxWidth: 420, margin: '0 auto', aspectRatio: '4/3' }}>
-        {/* Outer ring (General) */}
-        <StadiumRing size={100} color={cats[3]?.color || '#CD7F32'} label="General" cat={cats[3]} active={activeCategory === 'General'} onClick={() => onSelectCategory('General')} />
-        <StadiumRing size={75} color={cats[2]?.color || '#C0C0C0'} label="Silver" cat={cats[2]} active={activeCategory === 'Silver Stand'} onClick={() => onSelectCategory('Silver Stand')} />
-        <StadiumRing size={52} color={cats[1]?.color || '#FFD700'} label="Gold" cat={cats[1]} active={activeCategory === 'Gold Stand'} onClick={() => onSelectCategory('Gold Stand')} />
-        <StadiumRing size={30} color={cats[0]?.color || '#E5C100'} label="Platinum" cat={cats[0]} active={activeCategory === 'Platinum Pavilion'} onClick={() => onSelectCategory('Platinum Pavilion')} />
-        {/* Pitch center */}
-        <div style={{
-          position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
-          width: '12%', height: '12%', borderRadius: '50%',
-          background: 'rgba(0,200,100,0.3)', border: '2px solid rgba(0,200,100,0.5)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 10
-        }}>🏏</div>
-      </div>
-    </div>
-  );
-}
+function StadiumDiagram({ categories, selected, onSelect }) {
+  const zones = [
+    { key: 'General', label: 'GEN', rx: 170, ry: 120, fill: '#CD7F32' },
+    { key: 'Silver Stand', label: 'SIL', rx: 130, ry: 90, fill: '#C0C0C0' },
+    { key: 'Gold Stand', label: 'GLD', rx: 90, ry: 62, fill: '#FFD700' },
+    { key: 'Platinum Pavilion', label: 'PLT', rx: 52, ry: 36, fill: '#E5C100' },
+  ];
 
-function StadiumRing({ size, color, label, cat, active, onClick }) {
   return (
-    <div
-      onClick={onClick}
-      title={`${label} — ₹${cat?.price?.toLocaleString()}`}
-      style={{
-        position: 'absolute', top: '50%', left: '50%',
-        transform: 'translate(-50%, -50%)',
-        width: `${size}%`, aspectRatio: '1',
-        borderRadius: '50%',
-        border: `${active ? 4 : 2}px solid ${color}`,
-        background: active ? `${color}22` : `${color}08`,
-        cursor: 'pointer', transition: 'all 0.2s',
-        boxShadow: active ? `0 0 20px ${color}44` : 'none'
-      }}
-    />
-  );
-}
-
-function LegendItem({ color, border, label }) {
-  return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-      <div style={{ width: 12, height: 12, borderRadius: 2, background: color, border: border || 'none' }} />
-      <span>{label}</span>
-    </div>
+    <svg viewBox="0 0 380 260" style={{ width: '100%', maxWidth: 380, margin: '0 auto', display: 'block' }}>
+      {zones.map(z => {
+        const cat = categories?.find(c => c.name === z.key);
+        const isSelected = selected === z.key;
+        const isSoldOut = cat?.availableSeats === 0;
+        return (
+          <g key={z.key} onClick={() => !isSoldOut && onSelect(z.key)} style={{ cursor: isSoldOut ? 'not-allowed' : 'pointer' }}>
+            <ellipse
+              cx={190} cy={130}
+              rx={z.rx} ry={z.ry}
+              fill={`${z.fill}${isSelected ? '44' : '18'}`}
+              stroke={isSelected ? z.fill : `${z.fill}77`}
+              strokeWidth={isSelected ? 2.5 : 1.5}
+            />
+            <text x={190} y={130 - z.ry + 16} textAnchor="middle"
+              fill={isSelected ? z.fill : `${z.fill}cc`}
+              fontSize={10}
+              fontFamily="Rajdhani, sans-serif"
+              fontWeight="700"
+              letterSpacing="1"
+            >{z.label}</text>
+          </g>
+        );
+      })}
+      {/* Pitch */}
+      <ellipse cx={190} cy={130} rx={22} ry={14} fill="rgba(0,200,80,0.25)" stroke="rgba(0,200,80,0.5)" strokeWidth={1.5} />
+      <text x={190} y={134} textAnchor="middle" fontSize={9} fill="rgba(0,200,80,0.9)" fontFamily="Rajdhani, sans-serif">PITCH</text>
+    </svg>
   );
 }
