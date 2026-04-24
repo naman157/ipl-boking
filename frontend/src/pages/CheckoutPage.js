@@ -96,8 +96,8 @@ export default function CheckoutPage() {
       const url = `https://wa.me/${WHATSAPP_NUMBER}?text=${msg}`;
       window.open(url, '_blank');
 
-      toast.success('Booking confirmed! Redirecting to WhatsApp...');
-      navigate(`/booking/${bookingId}/confirm`);
+      toast.success('Redirecting to WhatsApp!');
+      navigate('/matches');
     } catch (err) {
       toast.error(err.response?.data?.error || 'Something went wrong. Try again.');
     } finally {
