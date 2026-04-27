@@ -6,7 +6,7 @@ import toast from 'react-hot-toast';
 import { format } from 'date-fns';
 
 // ✅ YOUR WHATSAPP NUMBER — include country code, no + or spaces
-const WHATSAPP_NUMBER = '919XXXXXXXXX'; // e.g. 919876543210 for +91 98765 43210
+const WHATSAPP_NUMBER = '917449831716'; // e.g. 919876543210 for +91 98765 43210
 
 function buildWhatsAppMessage(booking, user) {
   const { match, seats, totalAmount, convenienceFee, grandTotal, bookingId } = booking;
